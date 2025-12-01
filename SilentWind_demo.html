@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>SilentWind Prototype - Asymmetric Encryption (Fixed)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            box-sizing: border-box;
+        }
+        header {
+            text-align: center;
+            background: #000;
+            color: #fff;
+            padding: 10px;
+            margin: -20px -20px 20px -20px;
+        }
+        h1 { margin: 0; font-size: 1.8em; }
+        .chat-container { display: flex; gap: 20px; align-items: flex-start; }
+        .user-panel {
+            flex: 1;
+            background: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            min-height: 420px;
+        }
+        .user-panel h2 { margin-top: 0; color: #007bff; }
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #fafafa;
+            border-radius: 4px;
+            min-height: 120px;
+        }
+        .message { margin-bottom: 10px; padding: 8px; border-radius: 4px; word-wrap: break-word; }
+        .sent { background: #e3f2fd; text-align: right; }
+        .received { background: #f1f8e9; text-align: left; }
+        .encrypted { background: #ffebee; color: #c62828; font-family: monospace; white-space: pre-wrap; }
+        .input-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+        input[type="text"], textarea { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px; resize: vertical; }
+        button { padding: 10px 12px; background: #007bff; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .key-section { margin-bottom: 10px; }
+        .key-section input, .key-section textarea { width: 100%; margin-bottom: 5px; font-size: 0.8em; font-family: monospace; }
+        .status { font-size: 0.9em; color: #666; margin-bottom: 10px; }
+        .exchange-note { font-size: 0.8em; color: #999; margin-top: -5px; margin-bottom: 10px; }
+        @media (max-width: 900px) {
+            .chat-container { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>SilentWind Prototype</h1>
+        <p>Asymmetric E2E Encryption Demo (RSA-OAEP, 2048-bit keys)</p>
+    </header>
+
+    <div class="chat-container">
+        <!-- Sender (Alice) -->
+        <div class="user-panel" id="senderPanel">
+            <h2>Sender (Alice)</h2>
+            <div class="status" id="senderStatus">Status: Generate keys, then share public key with Bob.</div>
+
+            <div class="key-section">
+                <label>Alice's Public Key (JWK, copy to Bob):</label>
+                <textarea id="alicePublicKey" rows="3" readonly placeholder="Generate keys first..."></textarea>
+                <div class="exchange-note">Copy this public key and paste into Bob's "Sender Public Key" field.</div>
+
+                <label>Recipient Public Key (Bob's, paste here):</label>
+                <textarea id="bobPublicKey" rows="2" placeholder="Paste Bob's public key here..."></textarea>
+                <button id="setBobPublicBtn">Set Bob's Public Key</button>
+            </div>
+
+            <div class="messages" id="aliceMessages"></div>
+
+            <textarea id="aliceInput" placeholder="Type your secure message here..." rows="3"></textarea>
+
+            <div class="input-group">
+                <button id="genAliceBtn">Generate Keys</button>
+                <button id="sendAliceBtn" disabled>Encrypt & Send</button>
+                <button id="aliceDecryptBtn" disabled>Decrypt from Bob</button>
+                <button id="clearAliceBtn">Clear</button>
+            </div>
+        </div>
+
+        <!-- Receiver (Bob) -->
+        <div class="user-panel" id="receiverPanel">
+            <h2>Receiver (Bob)</h2>
+            <div class="status" id="receiverStatus">Status: Generate keys, then share public key with Alice.</div>
+
+            <div class="key-section">
+                <label>Bob's Public Key (JWK, copy to Alice):</label>
+                <textarea id="bobPublicKeyDisplay" rows="3" readonly placeholder="Generate keys first..."></textarea>
+                <div class="exchange-note">Copy this public key and paste into Alice's "Recipient Public Key" field.</div>
+
+                <label>Sender Public Key (Alice's, paste here):</label>
+                <textarea id="alicePublicKeyForBob" rows="2" placeholder="Paste Alice's public key here..."></textarea>
+                <button id="setAlicePublicBtn">Set Alice's Public Key</button>
+            </div>
+
+            <div class="messages" id="bobMessages"></div>
+
+            <textarea id="bobInput" placeholder="Type your secure message here..." rows="3"></textarea>
+
+            <div class="input-group">
+                <button id="genBobBtn">Generate Keys</button>
+                <button id="sendBobBtn" disabled>Encrypt & Send</button>
+                <button id="decryptBtn" disabled>Decrypt Received</button>
+                <button id="clearBobBtn">Clear</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Globals
+        let aliceKeys = null;
+        let bobKeys = null;
+
+        // Store imported public CryptoKey objects for encryption
+        let bobPublicCryptoKeyForAlice = null;   // Bob's public key imported into Alice context
+        let alicePublicCryptoKeyForBob = null;   // Alice's public key imported into Bob context
+
+        // Store the encrypted messages exchanged (base64 strings)
+        let encryptedMessageForBob = null;
+        let encryptedMessageForAlice = null;
+
+        // ---- Utilities: base64 <-> ArrayBuffer ----
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            const chunkSize = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+            }
+            return btoa(binary);
+        }
+
+        function base64ToArrayBuffer(base64) {
+            const binary = atob(base64);
+            const len = binary.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+            return bytes.buffer;
+        }
+
+        // ---- Key generation / import / export ----
+        async function generateKeyPair() {
+            return crypto.subtle.generateKey(
+                {
+                    name: 'RSA-OAEP',
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: 'SHA-256'
+                },
+                true,
+                ['encrypt', 'decrypt']
+            );
+        }
+
+        async function exportPublicKey(key) {
+            return crypto.subtle.exportKey('jwk', key);
+        }
+
+        async function importPublicKey(jwk) {
+            return crypto.subtle.importKey(
+                'jwk',
+                jwk,
+                { name: 'RSA-OAEP', hash: 'SHA-256' },
+                true,
+                ['encrypt']
+            );
+        }
+
+        async function encryptMessage(message, publicKeyCrypto) {
+            const encoder = new TextEncoder();
+            const encryptedBuffer = await crypto.subtle.encrypt(
+                { name: 'RSA-OAEP' },
+                publicKeyCrypto,
+                encoder.encode(message)
+            );
+            return arrayBufferToBase64(encryptedBuffer);
+        }
+
+        async function decryptMessage(encryptedBase64, privateKey) {
+            try {
+                const encryptedBuffer = base64ToArrayBuffer(encryptedBase64);
+                const decryptedBuffer = await crypto.subtle.decrypt(
+                    { name: 'RSA-OAEP' },
+                    privateKey,
+                    encryptedBuffer
+                );
+                return new TextDecoder().decode(decryptedBuffer);
+            } catch (e) {
+                console.error('decryptMessage error:', e);
+                return 'Decryption failed: Invalid key or corrupted message.';
+            }
+        }
+
+        // ---- DOM helpers ----
+        const $ = sel => document.querySelector(sel);
+        const $id = id => document.getElementById(id);
+
+        // ---- Buttons / DOM elements ----
+        const genAliceBtn = $id('genAliceBtn');
+        const genBobBtn = $id('genBobBtn');
+        const sendAliceBtn = $id('sendAliceBtn');
+        const sendBobBtn = $id('sendBobBtn');
+        const decryptBtn = $id('decryptBtn');
+        const aliceDecryptBtn = $id('aliceDecryptBtn');
+        const setBobPublicBtn = $id('setBobPublicBtn');
+        const setAlicePublicBtn = $id('setAlicePublicBtn');
+
+        // ---- Event wiring ----
+        genAliceBtn.addEventListener('click', async () => {
+            genAliceBtn.disabled = true;
+            genAliceBtn.textContent = 'Generating...';
+            try {
+                aliceKeys = await generateKeyPair();
+                const jwk = await exportPublicKey(aliceKeys.publicKey);
+                $id('alicePublicKey').value = JSON.stringify(jwk, null, 2);
+                $id('senderStatus').textContent = 'Status: Keys generated. Share public key with Bob, set his public key.';
+                genAliceBtn.textContent = 'Keys Generated';
+                // try copy
+                navigator.clipboard?.writeText($id('alicePublicKey').value).then(() => {
+                    alert("Alice's public key copied to clipboard! Paste into Bob.");
+                }).catch(() => {/* ignore clipboard errors */});
+            } catch (e) {
+                console.error('generateAlice error', e);
+                alert('Error generating Alice keys: ' + e.message);
+                genAliceBtn.disabled = false;
+                genAliceBtn.textContent = 'Generate Keys';
+            }
+        });
+
+        genBobBtn.addEventListener('click', async () => {
+            genBobBtn.disabled = true;
+            genBobBtn.textContent = 'Generating...';
+            try {
+                bobKeys = await generateKeyPair();
+                const jwk = await exportPublicKey(bobKeys.publicKey);
+                $id('bobPublicKeyDisplay').value = JSON.stringify(jwk, null, 2);
+                $id('receiverStatus').textContent = 'Status: Keys generated. Share public key with Alice, set her public key.';
+                genBobBtn.textContent = 'Keys Generated';
+                navigator.clipboard?.writeText($id('bobPublicKeyDisplay').value).then(() => {
+                    alert("Bob's public key copied to clipboard! Paste into Alice.");
+                }).catch(() => {/* ignore clipboard errors */});
+            } catch (e) {
+                console.error('generateBob error', e);
+                alert('Error generating Bob keys: ' + e.message);
+                genBobBtn.disabled = false;
+                genBobBtn.textContent = 'Generate Keys';
+            }
+        });
+
+        setBobPublicBtn.addEventListener('click', async () => {
+            const jwkStr = $id('bobPublicKey').value.trim();
+            if (!jwkStr) {
+                alert("Please paste Bob's public key (JWK JSON).");
+                return;
+            }
+            try {
+                const jwk = JSON.parse(jwkStr);
+                bobPublicCryptoKeyForAlice = await importPublicKey(jwk);
+                $id('senderStatus').textContent = "Status: Bob's public key set. Ready to encrypt and send.";
+                sendAliceBtn.disabled = false;
+            } catch (e) {
+                console.error('setBobPublicKey error', e);
+                alert('Invalid public key format.');
+            }
+        });
+
+        setAlicePublicBtn.addEventListener('click', async () => {
+            const jwkStr = $id('alicePublicKeyForBob').value.trim();
+            if (!jwkStr) {
+                alert("Please paste Alice's public key (JWK JSON).");
+                return;
+            }
+            try {
+                const jwk = JSON.parse(jwkStr);
+                alicePublicCryptoKeyForBob = await importPublicKey(jwk);
+                $id('receiverStatus').textContent = "Status: Alice's public key set. Ready to encrypt messages to her.";
+                sendBobBtn.disabled = false;
+            } catch (e) {
+                console.error('setAlicePublicKeyForBob error', e);
+                alert('Invalid public key format.');
+            }
+        });
+
+        sendAliceBtn.addEventListener('click', async () => {
+            const message = $id('aliceInput').value.trim();
+            if (!message) return;
+            if (!bobPublicCryptoKeyForAlice) {
+                alert("Set Bob's public key first.");
+                return;
+            }
+            try {
+                sendAliceBtn.disabled = true;
+                const encrypted = await encryptMessage(message, bobPublicCryptoKeyForAlice);
+                encryptedMessageForBob = encrypted;
+                decryptBtn.disabled = false;
+
+                // Show encrypted in Alice's messages
+                const div = document.createElement('div');
+                div.className = 'message sent encrypted';
+                div.innerHTML = `<strong>Encrypted for Bob:</strong><br><small>${encrypted}</small>`;
+                $id('aliceMessages').appendChild(div);
+                $id('aliceMessages').scrollTop = $id('aliceMessages').scrollHeight;
+
+                $id('senderStatus').textContent = 'Status: Message encrypted and "sent" to Bob (in-memory).';
+                $id('aliceInput').value = '';
+            } catch (e) {
+                console.error('sendAlice error', e);
+                alert('Error encrypting message for Bob: ' + e.message);
+            } finally {
+                // Re-enable after short delay
+                setTimeout(() => sendAliceBtn.disabled = false, 600);
+            }
+        });
+
+        sendBobBtn.addEventListener('click', async () => {
+            const message = $id('bobInput').value.trim();
+            if (!message) return;
+            if (!alicePublicCryptoKeyForBob) {
+                alert("Set Alice's public key first.");
+                return;
+            }
+            try {
+                sendBobBtn.disabled = true;
+                const encrypted = await encryptMessage(message, alicePublicCryptoKeyForBob);
+                encryptedMessageForAlice = encrypted;
+                aliceDecryptBtn.disabled = false;
+
+                const div = document.createElement('div');
+                div.className = 'message sent encrypted';
+                div.innerHTML = `<strong>Encrypted for Alice:</strong><br><small>${encrypted}</small>`;
+                $id('bobMessages').appendChild(div);
+                $id('bobMessages').scrollTop = $id('bobMessages').scrollHeight;
+
+                $id('receiverStatus').textContent = 'Status: Message encrypted and "sent" to Alice (in-memory).';
+                $id('bobInput').value = '';
+            } catch (e) {
+                console.error('sendBob error', e);
+                alert('Error encrypting message for Alice: ' + e.message);
+            } finally {
+                setTimeout(() => sendBobBtn.disabled = false, 600);
+            }
+        });
+
+        decryptBtn.addEventListener('click', async () => {
+            // Bob decrypts message that Alice "sent"
+            if (!encryptedMessageForBob) {
+                alert('No message to decrypt. Send one from Alice first.');
+                return;
+            }
+            if (!bobKeys) {
+                alert("Generate Bob's keys first.");
+                return;
+            }
+            try {
+                decryptBtn.disabled = true;
+                const decrypted = await decryptMessage(encryptedMessageForBob, bobKeys.privateKey);
+                const div = document.createElement('div');
+                div.className = 'message received';
+                div.innerHTML = `<strong>Decrypted from Alice:</strong><br>${decrypted}`;
+                $id('bobMessages').appendChild(div);
+                $id('bobMessages').scrollTop = $id('bobMessages').scrollHeight;
+
+                $id('receiverStatus').textContent = 'Status: Message decrypted successfully.';
+                encryptedMessageForBob = null;
+            } catch (e) {
+                console.error('receiveAndDecrypt error', e);
+                alert('Error decrypting message for Bob: ' + e.message);
+            } finally {
+                decryptBtn.disabled = true;
+            }
+        });
+
+        aliceDecryptBtn.addEventListener('click', async () => {
+            // Alice decrypts message that Bob "sent"
+            if (!encryptedMessageForAlice) {
+                alert('No message to decrypt. Send one from Bob first.');
+                return;
+            }
+            if (!aliceKeys) {
+                alert("Generate Alice's keys first.");
+                return;
+            }
+            try {
+                aliceDecryptBtn.disabled = true;
+                const decrypted = await decryptMessage(encryptedMessageForAlice, aliceKeys.privateKey);
+                const div = document.createElement('div');
+                div.className = 'message received';
+                div.innerHTML = `<strong>Decrypted from Bob:</strong><br>${decrypted}`;
+                $id('aliceMessages').appendChild(div);
+                $id('aliceMessages').scrollTop = $id('aliceMessages').scrollHeight;
+
+                $id('senderStatus').textContent = 'Status: Message decrypted successfully.';
+                encryptedMessageForAlice = null;
+            } catch (e) {
+                console.error('aliceDecryptFromBob error', e);
+                alert('Error decrypting message for Alice: ' + e.message);
+            } finally {
+                aliceDecryptBtn.disabled = true;
+            }
+        });
+
+        // Clear buttons
+        $id('clearAliceBtn').addEventListener('click', () => {
+            $id('aliceMessages').innerHTML = '';
+            $id('aliceInput').value = '';
+            $id('bobPublicKey').value = '';
+            $id('aliceDecryptBtn').disabled = true;
+            encryptedMessageForAlice = null;
+            $id('senderStatus').textContent = aliceKeys ? 'Status: Keys generated. Share public key with Bob, set his public key.' : 'Status: Generate keys, then share public key with Bob.';
+            sendAliceBtn.disabled = !bobPublicCryptoKeyForAlice;
+        });
+
+        $id('clearBobBtn').addEventListener('click', () => {
+            $id('bobMessages').innerHTML = '';
+            $id('bobInput').value = '';
+            $id('alicePublicKeyForBob').value = '';
+            $id('decryptBtn').disabled = true;
+            encryptedMessageForBob = null;
+            $id('receiverStatus').textContent = bobKeys ? 'Status: Keys generated. Share public key with Alice, set her public key.' : 'Status: Generate keys, share public key with Alice.';
+            sendBobBtn.disabled = !alicePublicCryptoKeyForBob;
+        });
+
+        // Friendly initial state
+        sendAliceBtn.disabled = true;
+        sendBobBtn.disabled = true;
+        decryptBtn.disabled = true;
+        aliceDecryptBtn.disabled = true;
+
+        // Show helpful console note
+        console.log('SilentWind Prototype JS loaded. Generate keys for Alice and Bob, exchange exported JWKs, then encrypt & decrypt messages.');
+    </script>
+</body>
+</html>
+
